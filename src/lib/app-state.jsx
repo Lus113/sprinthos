@@ -1,474 +1,600 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
   useState
 } from "react";
-import {
-  blogPosts as seedPosts,
-  faqs,
-  navigationLinks,
-  orders as seedOrders,
-  partners,
-  products as seedProducts,
-  siteCopy,
-  tariffRequests as seedRequests,
-  tariffs,
-  users as seedUsers
-} from "../data/seed";
+import { faqs, navigationLinks, partners, siteCopy, tariffs } from "../data/seed";
+import { apiRequest } from "./api";
 
-const STORAGE_KEY = "ophelia-store-state-v2";
+const SESSION_KEY = "ophelia-session-v4";
+const GUEST_CART_KEY = "ophelia-guest-cart-v1";
 
 const AppStateContext = createContext(null);
 
-function slugify(value) {
-  return value
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
+const emptyCart = {
+  items: [],
+  subtotal: 0,
+  discount: 0,
+  total: 0,
+  count: 0
+};
 
-function createInitialState() {
-  return {
-    products: seedProducts,
-    blogPosts: seedPosts,
-    users: seedUsers,
-    orders: seedOrders,
-    tariffRequests: seedRequests,
-    cart: [],
-    session: { userId: null, token: null },
-    favoritesByUser: {}
-  };
-}
-
-function loadState() {
+function loadSession() {
   if (typeof window === "undefined") {
-    return createInitialState();
+    return { token: null };
   }
 
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-
-    if (!raw) {
-      return createInitialState();
-    }
-
-    const parsed = JSON.parse(raw);
-
-    return {
-      ...createInitialState(),
-      ...parsed
-    };
+    return JSON.parse(window.localStorage.getItem(SESSION_KEY) || '{"token":null}');
   } catch {
-    return createInitialState();
+    return { token: null };
   }
 }
 
-function normalizeImages(input, fallback = []) {
-  if (Array.isArray(input) && input.length > 0) {
-    return input.filter(Boolean).slice(0, 5);
+function normalizeGuestItems(items) {
+  return Array.isArray(items)
+    ? items
+        .map((item) => ({
+          productId: String(item.productId),
+          quantity: Math.max(1, Number(item.quantity || 1))
+        }))
+        .filter((item) => item.productId && Number.isFinite(item.quantity))
+    : [];
+}
+
+function loadGuestCartItems() {
+  if (typeof window === "undefined") {
+    return [];
   }
 
-  if (typeof input === "string" && input.trim()) {
-    return [input.trim()];
+  try {
+    return normalizeGuestItems(JSON.parse(window.localStorage.getItem(GUEST_CART_KEY) || "[]"));
+  } catch {
+    return [];
   }
+}
 
-  return fallback;
+function buildGuestCart(guestItems, products) {
+  const items = normalizeGuestItems(guestItems)
+    .map((item) => {
+      const product = products.find((entry) => String(entry.id) === String(item.productId));
+      return product ? { productId: String(item.productId), quantity: item.quantity, product } : null;
+    })
+    .filter(Boolean);
+  const subtotal = items.reduce((sum, item) => sum + item.product.price * item.quantity, 0);
+  const discount = subtotal > 100000 ? subtotal * 0.24 : 0;
+  const total = subtotal - discount;
+
+  return {
+    items,
+    subtotal,
+    discount,
+    total,
+    count: items.reduce((sum, item) => sum + item.quantity, 0)
+  };
+}
+
+function productPayloadFromForm(productInput) {
+  return {
+    name: productInput.name,
+    category: productInput.category,
+    manufacturer: productInput.manufacturer,
+    price: Number(productInput.price),
+    rating: Number(productInput.rating || 4.7),
+    stock: Number(productInput.stock || 0),
+    shortDescription: productInput.shortDescription,
+    description: productInput.description,
+    images: productInput.images || [],
+    specs: {
+      Особенность: productInput.featureOne || "Премиальное исполнение",
+      Гарантия: productInput.featureTwo || "Официальная поддержка",
+      Доставка: productInput.featureThree || "Доступно по всей стране",
+      Отделка: productInput.featureFour || "Отобрано Офелией"
+    }
+  };
+}
+
+function contentToEditorString(content) {
+  return Array.isArray(content) ? content.join("\n") : String(content || "");
 }
 
 export function AppStateProvider({ children }) {
-  const [state, setState] = useState(loadState);
+  const [session, setSession] = useState(loadSession);
+  const [guestCartItems, setGuestCartItems] = useState(loadGuestCartItems);
+  const [products, setProducts] = useState([]);
+  const [blogPosts, setBlogPosts] = useState([]);
+  const [orders, setOrders] = useState([]);
+  const [tariffRequests, setTariffRequests] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [favorites, setFavorites] = useState([]);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [cart, setCart] = useState(emptyCart);
+  const [authResolved, setAuthResolved] = useState(false);
 
   useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }, [state]);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    }
+  }, [session]);
 
-  const currentUser = useMemo(
-    () => state.users.find((user) => user.id === state.session.userId) || null,
-    [state.session.userId, state.users]
-  );
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(GUEST_CART_KEY, JSON.stringify(guestCartItems));
+    }
+  }, [guestCartItems]);
 
-  const favorites = currentUser
-    ? state.favoritesByUser[currentUser.id] || []
-    : [];
+  const fetchPublicData = useCallback(async () => {
+    const [nextProducts, nextPosts] = await Promise.all([
+      apiRequest("/api/products"),
+      apiRequest("/api/blog-posts")
+    ]);
+    setProducts(nextProducts);
+    setBlogPosts(nextPosts);
+    return nextProducts;
+  }, []);
 
-  const cartDetailed = useMemo(
-    () =>
-      state.cart
-        .map((item) => {
-          const product = state.products.find((entry) => entry.id === item.productId);
-          return product ? { ...item, product } : null;
-        })
-        .filter(Boolean),
-    [state.cart, state.products]
-  );
-
-  const cartSubtotal = cartDetailed.reduce(
-    (sum, item) => sum + item.product.price * item.quantity,
-    0
-  );
-  const cartDiscount = cartSubtotal > 100000 ? cartSubtotal * 0.24 : 0;
-  const cartTotal = cartSubtotal - cartDiscount;
-  const cartCount = cartDetailed.reduce((sum, item) => sum + item.quantity, 0);
-
-  const categories = useMemo(
-    () => Array.from(new Set(state.products.map((product) => product.category))),
-    [state.products]
-  );
-
-  const login = ({ email, password }) => {
-    const normalizedEmail = email.trim().toLowerCase();
-    const existingUser = state.users.find(
-      (user) => user.email.toLowerCase() === normalizedEmail
-    );
-
-    if (existingUser) {
-      if (existingUser.password !== password) {
-        return { ok: false, message: "Неверный пароль." };
+  const fetchAuthenticatedData = useCallback(
+    async (tokenOverride = session.token) => {
+      if (!tokenOverride) {
+        setCurrentUser(null);
+        setFavorites([]);
+        setOrders([]);
+        setTariffRequests([]);
+        setUsers([]);
+        return null;
       }
 
-      setState((current) => ({
-        ...current,
-        session: {
-          userId: existingUser.id,
-          token: `token-${Date.now()}`
+      try {
+        const me = await apiRequest("/api/auth/me", { token: tokenOverride });
+        setCurrentUser(me);
+
+        const [nextFavorites, nextOrders] = await Promise.all([
+          apiRequest("/api/favorites", { token: tokenOverride }),
+          apiRequest("/api/orders", { token: tokenOverride })
+        ]);
+
+        setFavorites(nextFavorites);
+        setOrders(nextOrders);
+
+        if (me.role === "admin") {
+          const [nextRequests, nextUsers] = await Promise.all([
+            apiRequest("/api/tariff-requests", { token: tokenOverride }),
+            apiRequest("/api/users", { token: tokenOverride })
+          ]);
+
+          setTariffRequests(nextRequests);
+          setUsers(nextUsers);
+        } else {
+          setTariffRequests([]);
+          setUsers([]);
         }
-      }));
 
-      return { ok: true, user: existingUser };
-    }
+        return me;
+      } catch (error) {
+        if (error.status === 401) {
+          setSession({ token: null });
+          setCurrentUser(null);
+          setFavorites([]);
+          setOrders([]);
+          setTariffRequests([]);
+          setUsers([]);
+          return null;
+        }
 
-    if (password.trim().length < 6) {
-      return {
-        ok: false,
-        message: "Используйте не менее 6 символов для создания аккаунта покупателя."
-      };
-    }
+        throw error;
+      }
+    },
+    [session.token]
+  );
 
-    const nameFromEmail =
-      normalizedEmail.split("@")[0].replace(/[._-]+/g, " ") || "Новый покупатель";
-    const createdUser = {
-      id: `user-${Date.now()}`,
-      role: "user",
-      name: nameFromEmail.replace(/\b\w/g, (letter) => letter.toUpperCase()),
-      email: normalizedEmail,
-      password,
-      addresses: []
+  const fetchCart = useCallback(
+    async (tokenOverride = session.token, productList = products) => {
+      if (!tokenOverride) {
+        const guestCart = buildGuestCart(guestCartItems, productList);
+        setCart(guestCart);
+        return guestCart;
+      }
+
+      const nextCart = await apiRequest("/api/cart", { token: tokenOverride });
+      setCart(nextCart);
+      return nextCart;
+    },
+    [guestCartItems, products, session.token]
+  );
+
+  useEffect(() => {
+    const bootstrap = async () => {
+      try {
+        const nextProducts = await fetchPublicData();
+        const me = await fetchAuthenticatedData();
+
+        if (session.token && me) {
+          await fetchCart(session.token, nextProducts);
+        } else {
+          setCart(buildGuestCart(loadGuestCartItems(), nextProducts));
+        }
+      } finally {
+        setAuthResolved(true);
+      }
     };
 
-    setState((current) => ({
-      ...current,
-      users: [...current.users, createdUser],
-      session: {
-        userId: createdUser.id,
-        token: `token-${Date.now()}`
-      }
-    }));
+    bootstrap();
+  }, [fetchAuthenticatedData, fetchCart, fetchPublicData, session.token]);
 
-    return { ok: true, user: createdUser, created: true };
+  useEffect(() => {
+    if (!session.token && products.length) {
+      setCart(buildGuestCart(guestCartItems, products));
+    }
+  }, [guestCartItems, products, session.token]);
+
+  const categories = useMemo(
+    () => Array.from(new Set(products.map((product) => product.category))),
+    [products]
+  );
+
+  const login = async ({ email, password }) => {
+    try {
+      const result = await apiRequest("/api/auth/login", {
+        method: "POST",
+        body: { email, password }
+      });
+
+      setSession({ token: result.token });
+
+      if (guestCartItems.length) {
+        await apiRequest("/api/cart/sync", {
+          method: "POST",
+          token: result.token,
+          body: { items: guestCartItems }
+        });
+        setGuestCartItems([]);
+      }
+
+      setCurrentUser(result.user);
+      await fetchAuthenticatedData(result.token);
+      await fetchCart(result.token, products);
+      return { ok: true, user: result.user, created: result.created };
+    } catch (error) {
+      return { ok: false, message: error.message };
+    }
   };
 
-  const logout = () => {
-    setState((current) => ({
-      ...current,
-      session: { userId: null, token: null }
-    }));
+  const logout = async () => {
+    if (session.token) {
+      try {
+        await apiRequest("/api/auth/logout", {
+          method: "POST",
+          token: session.token
+        });
+      } catch {}
+    }
+
+    setSession({ token: null });
+    setCurrentUser(null);
+    setFavorites([]);
+    setOrders([]);
+    setTariffRequests([]);
+    setUsers([]);
+    setCart(buildGuestCart(guestCartItems, products));
   };
 
-  const addToCart = (productId, quantity = 1) => {
-    setState((current) => {
-      const product = current.products.find((entry) => entry.id === productId);
-
-      if (!product) {
-        return current;
-      }
-
-      const nextQty = Math.max(1, Math.min(quantity, product.stock));
-      const existing = current.cart.find((item) => item.productId === productId);
-
-      if (existing) {
-        return {
-          ...current,
-          cart: current.cart.map((item) =>
-            item.productId === productId
-              ? {
-                  ...item,
-                  quantity: Math.min(item.quantity + nextQty, product.stock)
-                }
+  const addToCart = async (productId, quantity = 1) => {
+    if (!session.token) {
+      const existing = guestCartItems.find((item) => String(item.productId) === String(productId));
+      const nextItems = existing
+        ? guestCartItems.map((item) =>
+            String(item.productId) === String(productId)
+              ? { ...item, quantity: item.quantity + quantity }
               : item
           )
-        };
-      }
+        : [...guestCartItems, { productId: String(productId), quantity }];
 
-      return {
-        ...current,
-        cart: [...current.cart, { productId, quantity: nextQty }]
-      };
-    });
+      setGuestCartItems(nextItems);
+      setCart(buildGuestCart(nextItems, products));
+      return;
+    }
+
+    const existing = cart.items.find((item) => String(item.productId) === String(productId));
+    const nextQuantity = existing ? existing.quantity + quantity : quantity;
+    setCart(
+      await apiRequest("/api/cart/items", {
+        method: "POST",
+        token: session.token,
+        body: { productId: Number(productId), quantity: nextQuantity }
+      })
+    );
   };
 
-  const updateCartQuantity = (productId, quantity) => {
-    setState((current) => {
-      const product = current.products.find((entry) => entry.id === productId);
+  const updateCartQuantity = async (productId, quantity) => {
+    if (!session.token) {
+      const nextItems = guestCartItems.map((item) =>
+        String(item.productId) === String(productId)
+          ? { ...item, quantity }
+          : item
+      );
+      setGuestCartItems(nextItems);
+      setCart(buildGuestCart(nextItems, products));
+      return;
+    }
 
-      if (!product) {
-        return current;
-      }
-
-      const nextQuantity = Math.max(1, Math.min(quantity, product.stock));
-
-      return {
-        ...current,
-        cart: current.cart.map((item) =>
-          item.productId === productId
-            ? { ...item, quantity: nextQuantity }
-            : item
-        )
-      };
-    });
+    setCart(
+      await apiRequest(`/api/cart/items/${productId}`, {
+        method: "PATCH",
+        token: session.token,
+        body: { quantity }
+      })
+    );
   };
 
-  const removeFromCart = (productId) => {
-    setState((current) => ({
-      ...current,
-      cart: current.cart.filter((item) => item.productId !== productId)
-    }));
+  const removeFromCart = async (productId) => {
+    if (!session.token) {
+      const nextItems = guestCartItems.filter((item) => String(item.productId) !== String(productId));
+      setGuestCartItems(nextItems);
+      setCart(buildGuestCart(nextItems, products));
+      return;
+    }
+
+    setCart(
+      await apiRequest(`/api/cart/items/${productId}`, {
+        method: "DELETE",
+        token: session.token
+      })
+    );
   };
 
-  const toggleFavorite = (productId) => {
+  const toggleFavorite = async (productId) => {
     if (!currentUser) {
       return { ok: false, message: "Войдите в аккаунт, чтобы сохранять избранное." };
     }
 
-    setState((current) => {
-      const existingFavorites = current.favoritesByUser[currentUser.id] || [];
-      const hasProduct = existingFavorites.includes(productId);
-
-      return {
-        ...current,
-        favoritesByUser: {
-          ...current.favoritesByUser,
-          [currentUser.id]: hasProduct
-            ? existingFavorites.filter((id) => id !== productId)
-            : [...existingFavorites, productId]
-        }
-      };
+    const result = await apiRequest("/api/favorites", {
+      method: "POST",
+      token: session.token,
+      body: { productId: Number(productId) }
     });
+
+    setFavorites((current) =>
+      result.active
+        ? [...current, String(productId)]
+        : current.filter((id) => String(id) !== String(productId))
+    );
 
     return { ok: true };
   };
 
-  const submitTariffRequest = ({ name, phone, tariff }) => {
-    const request = {
-      id: `request-${Date.now()}`,
-      name,
-      phone,
-      tariff,
-      status: "Не выполнено",
-      date: new Date().toISOString()
-    };
+  const submitTariffRequest = async ({ name, phone, tariff }) => {
+    const request = await apiRequest("/api/tariff-requests", {
+      method: "POST",
+      body: { name, phone, tariff }
+    });
 
-    setState((current) => ({
-      ...current,
-      tariffRequests: [request, ...current.tariffRequests]
-    }));
+    if (currentUser?.role === "admin") {
+      setTariffRequests((current) => [request, ...current]);
+    }
 
     return request;
   };
 
-  const submitOrder = ({ fullName, phone, address }) => {
-    const order = {
-      id: `order-${Date.now()}`,
-      number: `OPH-${String(Date.now()).slice(-6)}`,
-      userId: currentUser?.id || null,
-      recipient: fullName,
-      phone,
-      address,
-      date: new Date().toISOString(),
-      status: "Оформлен",
-      subtotal: cartSubtotal,
-      discount: cartDiscount,
-      total: cartTotal,
-      items: cartDetailed.map((item) => ({
-        productId: item.product.id,
-        quantity: item.quantity,
-        price: item.product.price
-      }))
-    };
+  const submitOrder = async ({ fullName, phone, address }) => {
+    const order = await apiRequest("/api/orders", {
+      method: "POST",
+      token: session.token,
+      body: {
+        fullName,
+        phone,
+        address,
+        items: session.token ? undefined : guestCartItems
+      }
+    });
 
-    setState((current) => ({
-      ...current,
-      orders: [order, ...current.orders],
-      cart: [],
-      users: currentUser
-        ? current.users.map((user) =>
-            user.id === currentUser.id
-              ? {
-                  ...user,
-                  addresses: user.addresses.includes(address)
-                    ? user.addresses
-                    : [address, ...user.addresses]
-                }
-              : user
-          )
-        : current.users,
-      products: current.products.map((product) => {
-        const orderedItem = order.items.find((item) => item.productId === product.id);
+    if (session.token) {
+      setCart(emptyCart);
+      await fetchAuthenticatedData(session.token);
+    } else {
+      setGuestCartItems([]);
+      setCart(emptyCart);
+    }
+
+    const orderedItems = order.items || [];
+    setProducts((current) =>
+      current.map((product) => {
+        const orderedItem = orderedItems.find(
+          (item) => String(item.productId) === String(product.id)
+        );
         return orderedItem
           ? { ...product, stock: Math.max(0, product.stock - orderedItem.quantity) }
           : product;
       })
-    }));
+    );
 
     return order;
   };
 
-  const addAddress = (address) => {
+  const addAddress = async (address) => {
     if (!currentUser || !address.trim()) {
       return;
     }
 
-    setState((current) => ({
-      ...current,
-      users: current.users.map((user) =>
-        user.id === currentUser.id
-          ? {
-              ...user,
-              addresses: user.addresses.includes(address.trim())
-                ? user.addresses
-                : [address.trim(), ...user.addresses]
-            }
-          : user
-      )
-    }));
+    const nextUser = await apiRequest("/api/users/me/addresses", {
+      method: "POST",
+      token: session.token,
+      body: { address }
+    });
+
+    setCurrentUser(nextUser);
   };
 
-  const updateProfile = ({ name }) => {
+  const updateProfile = async ({ name }) => {
     if (!currentUser) {
       return;
     }
 
-    setState((current) => ({
-      ...current,
-      users: current.users.map((user) =>
-        user.id === currentUser.id ? { ...user, name: name.trim() } : user
-      )
-    }));
+    const nextUser = await apiRequest("/api/users/me", {
+      method: "PATCH",
+      token: session.token,
+      body: { name }
+    });
+
+    setCurrentUser(nextUser);
   };
 
-  const upsertProduct = (productInput) => {
-    setState((current) => {
-      const images = normalizeImages(productInput.images, productInput.photoUrl
-        ? productInput.photoUrl
-            .split(",")
-            .map((value) => value.trim())
-            .filter(Boolean)
-        : []);
+  const uploadImages = async (files, bucket = "product-images") => {
+    const formData = new FormData();
 
-      const nextProduct = {
-        id: productInput.id || `prod-${Date.now()}`,
-        slug: productInput.slug || slugify(productInput.name),
-        name: productInput.name,
-        category: productInput.category,
-        manufacturer: productInput.manufacturer,
-        price: Number(productInput.price),
-        rating: Number(productInput.rating || 4.7),
-        stock: Number(productInput.stock),
-        shortDescription: productInput.shortDescription,
-        description: productInput.description,
-        images,
-        specs: {
-          Особенность: productInput.featureOne || "Премиальное исполнение",
-          Гарантия: productInput.featureTwo || "Официальная поддержка",
-          Доставка: productInput.featureThree || "Доступно по всей стране",
-          Отделка: productInput.featureFour || "Отобрано Ophelia"
-        }
-      };
+    for (const file of files) {
+      formData.append("images", file);
+    }
 
-      const exists = current.products.some((product) => product.id === nextProduct.id);
+    const result = await apiRequest(`/api/uploads?bucket=${encodeURIComponent(bucket)}`, {
+      method: "POST",
+      token: session.token,
+      body: formData
+    });
 
-      return {
-        ...current,
-        products: exists
-          ? current.products.map((product) =>
-              product.id === nextProduct.id ? nextProduct : product
-            )
-          : [nextProduct, ...current.products]
-      };
+    return result.paths || [];
+  };
+
+  const deleteUploadedImages = async (paths) => {
+    if (!paths.length) {
+      return;
+    }
+
+    await apiRequest("/api/uploads", {
+      method: "DELETE",
+      token: session.token,
+      body: { paths }
     });
   };
 
-  const deleteProduct = (productId) => {
-    setState((current) => ({
-      ...current,
-      products: current.products.filter((product) => product.id !== productId),
-      cart: current.cart.filter((item) => item.productId !== productId)
-    }));
+  const upsertProduct = async (productInput) => {
+    const payload = productPayloadFromForm(productInput);
+    const result = productInput.id
+      ? await apiRequest(`/api/products/${productInput.id}`, {
+          method: "PUT",
+          token: session.token,
+          body: payload
+        })
+      : await apiRequest("/api/products", {
+          method: "POST",
+          token: session.token,
+          body: payload
+        });
+
+    setProducts((current) =>
+      current.some((product) => String(product.id) === String(result.id))
+        ? current.map((product) => (String(product.id) === String(result.id) ? result : product))
+        : [result, ...current]
+    );
+
+    return result;
   };
 
-  const upsertBlogPost = (postInput) => {
-    setState((current) => {
-      const nextPost = {
-        id: postInput.id || `post-${Date.now()}`,
-        slug: postInput.slug || slugify(postInput.title),
-        title: postInput.title,
-        excerpt: postInput.excerpt,
-        images: normalizeImages(postInput.images, postInput.image ? [postInput.image] : []),
-        date: postInput.date || new Date().toISOString().slice(0, 10),
-        readingTime: postInput.readingTime || "4 мин чтения",
-        content: postInput.content
-          .split("\n")
-          .map((paragraph) => paragraph.trim())
-          .filter(Boolean)
-      };
-
-      const exists = current.blogPosts.some((post) => post.id === nextPost.id);
-
-      return {
-        ...current,
-        blogPosts: exists
-          ? current.blogPosts.map((post) => (post.id === nextPost.id ? nextPost : post))
-          : [nextPost, ...current.blogPosts]
-      };
+  const deleteProduct = async (productId) => {
+    await apiRequest(`/api/products/${productId}`, {
+      method: "DELETE",
+      token: session.token
     });
-  };
 
-  const deleteBlogPost = (postId) => {
-    setState((current) => ({
+    setProducts((current) => current.filter((product) => String(product.id) !== String(productId)));
+    setCart((current) => ({
       ...current,
-      blogPosts: current.blogPosts.filter((post) => post.id !== postId)
+      items: current.items.filter((item) => String(item.productId) !== String(productId))
     }));
+    setGuestCartItems((current) => current.filter((item) => String(item.productId) !== String(productId)));
   };
 
-  const updateOrderStatus = (orderId, status) => {
-    setState((current) => ({
-      ...current,
-      orders: current.orders.map((order) =>
-        order.id === orderId ? { ...order, status } : order
+  const upsertBlogPost = async (postInput) => {
+    const payload = {
+      title: postInput.title,
+      excerpt: postInput.excerpt,
+      images: postInput.images || [],
+      content: contentToEditorString(postInput.content)
+    };
+
+    const result = postInput.id
+      ? await apiRequest(`/api/blog-posts/${postInput.id}`, {
+          method: "PUT",
+          token: session.token,
+          body: payload
+        })
+      : await apiRequest("/api/blog-posts", {
+          method: "POST",
+          token: session.token,
+          body: payload
+        });
+
+    setBlogPosts((current) =>
+      current.some((post) => String(post.id) === String(result.id))
+        ? current.map((post) => (String(post.id) === String(result.id) ? result : post))
+        : [result, ...current]
+    );
+  };
+
+  const deleteBlogPost = async (postId) => {
+    await apiRequest(`/api/blog-posts/${postId}`, {
+      method: "DELETE",
+      token: session.token
+    });
+
+    setBlogPosts((current) => current.filter((post) => String(post.id) !== String(postId)));
+  };
+
+  const updateOrderStatus = async (orderId, status) => {
+    const nextOrder = await apiRequest(`/api/orders/${orderId}/status`, {
+      method: "PATCH",
+      token: session.token,
+      body: { status }
+    });
+
+    setOrders((current) =>
+      current.map((order) => (String(order.id) === String(nextOrder.id) ? nextOrder : order))
+    );
+  };
+
+  const updateRequestStatus = async (requestId, status) => {
+    const nextRequest = await apiRequest(`/api/tariff-requests/${requestId}/status`, {
+      method: "PATCH",
+      token: session.token,
+      body: { status }
+    });
+
+    setTariffRequests((current) =>
+      current.map((request) =>
+        String(request.id) === String(nextRequest.id) ? nextRequest : request
       )
-    }));
+    );
   };
 
-  const updateRequestStatus = (requestId, status) => {
-    setState((current) => ({
-      ...current,
-      tariffRequests: current.tariffRequests.map((request) =>
-        request.id === requestId ? { ...request, status } : request
-      )
-    }));
-  };
+  const updateWarehouseStock = async (productId, stock) => {
+    const product = products.find((entry) => String(entry.id) === String(productId));
 
-  const updateWarehouseStock = (productId, stock) => {
-    setState((current) => ({
-      ...current,
-      products: current.products.map((product) =>
-        product.id === productId
-          ? { ...product, stock: Math.max(0, Number(stock)) }
-          : product
-      )
-    }));
+    if (!product) {
+      return;
+    }
+
+    const payload = {
+      ...productPayloadFromForm({
+        ...product,
+        stock,
+        featureOne: Object.values(product.specs || {})[0] || "",
+        featureTwo: Object.values(product.specs || {})[1] || "",
+        featureThree: Object.values(product.specs || {})[2] || "",
+        featureFour: Object.values(product.specs || {})[3] || ""
+      })
+    };
+
+    const nextProduct = await apiRequest(`/api/products/${productId}`, {
+      method: "PUT",
+      token: session.token,
+      body: payload
+    });
+
+    setProducts((current) =>
+      current.map((entry) => (String(entry.id) === String(nextProduct.id) ? nextProduct : entry))
+    );
   };
 
   const value = {
@@ -479,17 +605,18 @@ export function AppStateProvider({ children }) {
     tariffs,
     categories,
     currentUser,
+    authResolved,
     favorites,
-    cartDetailed,
-    cartSubtotal,
-    cartDiscount,
-    cartTotal,
-    cartCount,
-    products: state.products,
-    blogPosts: state.blogPosts,
-    orders: state.orders,
-    tariffRequests: state.tariffRequests,
-    users: state.users,
+    cartDetailed: cart.items,
+    cartSubtotal: cart.subtotal,
+    cartDiscount: cart.discount,
+    cartTotal: cart.total,
+    cartCount: cart.count,
+    products,
+    blogPosts,
+    orders,
+    tariffRequests,
+    users,
     login,
     logout,
     addToCart,
@@ -500,6 +627,8 @@ export function AppStateProvider({ children }) {
     submitOrder,
     addAddress,
     updateProfile,
+    uploadImages,
+    deleteUploadedImages,
     upsertProduct,
     deleteProduct,
     upsertBlogPost,
@@ -507,7 +636,7 @@ export function AppStateProvider({ children }) {
     updateOrderStatus,
     updateRequestStatus,
     updateWarehouseStock,
-    isFavorite: (productId) => favorites.includes(productId)
+    isFavorite: (productId) => favorites.includes(String(productId))
   };
 
   return <AppStateContext.Provider value={value}>{children}</AppStateContext.Provider>;

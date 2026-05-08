@@ -41,8 +41,8 @@ const emptyPost = {
   content: ""
 };
 
-const orderStatuses = ["Оформлен", "В пути", "Доставлен"];
-const requestStatuses = ["Не выполнено", "В очереди", "Готово"];
+const orderStatuses = ["Собирается", "В пути", "Доставлен"];
+const requestStatuses = ["Не выполнен", "В очереди", "Сделан"];
 
 function InputField({ placeholder, value, onChange, type = "text" }) {
   return (
@@ -68,7 +68,9 @@ export default function AdminPage() {
     updateRequestStatus,
     updateWarehouseStock,
     deleteBlogPost,
-    deleteProduct
+    deleteProduct,
+    uploadImages,
+    deleteUploadedImages
   } = useAppState();
   const [activeTab, setActiveTab] = useState("Сводка");
   const [productForm, setProductForm] = useState(emptyProduct);
@@ -250,6 +252,8 @@ export default function AdminPage() {
                     setProductForm((current) => ({ ...current, images }));
                     setProductFormError("");
                   }}
+                  onUpload={(files) => uploadImages(files, "product-images")}
+                  onRemove={deleteUploadedImages}
                   maxFiles={5}
                   primaryLabel="Главное фото"
                 />
@@ -412,6 +416,8 @@ export default function AdminPage() {
                     setPostForm((current) => ({ ...current, images }));
                     setPostFormError("");
                   }}
+                  onUpload={(files) => uploadImages(files, "blog-images")}
+                  onRemove={deleteUploadedImages}
                   maxFiles={5}
                   primaryLabel="Обложка"
                 />

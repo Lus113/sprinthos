@@ -27,7 +27,11 @@ function ScrollToTop() {
 }
 
 function AdminRoute() {
-  const { currentUser } = useAppState();
+  const { authResolved, currentUser } = useAppState();
+
+  if (!authResolved) {
+    return null;
+  }
 
   if (!currentUser) {
     return <Navigate to="/login?redirect=/admin" replace />;

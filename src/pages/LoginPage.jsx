@@ -32,11 +32,15 @@ export default function LoginPage() {
         ? { email: "admin@admin.com", password: "password" }
         : { email: "hello@ophelia.store", password: "ophelia123" };
 
-    const result = login(credentials);
+    const runLogin = async () => {
+      const result = await login(credentials);
 
-    if (result.ok) {
-      navigate(result.user.role === "admin" ? "/admin" : redirect, { replace: true });
-    }
+      if (result.ok) {
+        navigate(result.user.role === "admin" ? "/admin" : redirect, { replace: true });
+      }
+    };
+
+    runLogin();
   }, [currentUser, demo, login, navigate, redirect]);
 
   const handleSubmit = (event) => {
@@ -44,8 +48,8 @@ export default function LoginPage() {
     setLoading(true);
     setMessage("");
 
-    window.setTimeout(() => {
-      const result = login(form);
+    window.setTimeout(async () => {
+      const result = await login(form);
       setLoading(false);
 
       if (!result.ok) {

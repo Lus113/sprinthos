@@ -1,26 +1,20 @@
-import { ImagePlus, Trash2, Upload } from "lucide-react";
+import { ImagePlus, LoaderCircle, Trash2, Upload } from "lucide-react";
 import { useId, useRef, useState } from "react";
-
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error("Не удалось прочитать файл."));
-    reader.readAsDataURL(file);
-  });
-}
 
 export default function ImageDropzone({
   label,
   hint,
   value = [],
   onChange,
+  onUpload,
+  onRemove,
   maxFiles = 5,
   primaryLabel = "Главное фото"
 }) {
   const inputId = useId();
   const inputRef = useRef(null);
   const [dragActive, setDragActive] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
 
   const handleFiles = async (fileList) => {
@@ -48,10 +42,25 @@ export default function ImageDropzone({
     }
 
     try {
-      const urls = await Promise.all(nextBatch.map(readFileAsDataUrl));
+      setLoading(true);
+      const urls = onUpload ? await onUpload(nextBatch) : [];
       onChange([...value, ...urls]);
     } catch (error) {
-      setMessage(error.message || "Не удалось обработать изображения.");
+      setMessage(error.message || "Не удалось загрузить изображения.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const removeImage = async (image, index) => {
+    try {
+      if (onRemove) {
+        await onRemove([image]);
+      }
+      onChange(value.filter((_, imageIndex) => imageIndex !== index));
+      setMessage("");
+    } catch (error) {
+      setMessage(error.message || "Не удалось удалить изображение.");
     }
   };
 
@@ -89,7 +98,7 @@ export default function ImageDropzone({
         }`}
       >
         <div className="flex size-14 items-center justify-center rounded-full bg-white text-lime-700 shadow-sm">
-          <Upload className="size-6" />
+          {loading ? <LoaderCircle className="size-6 animate-spin" /> : <Upload className="size-6" />}
         </div>
         <p className="mt-4 text-base font-semibold text-stone-900">
           Перетащите изображения сюда или нажмите для выбора
@@ -123,10 +132,7 @@ export default function ImageDropzone({
                 </div>
                 <button
                   type="button"
-                  onClick={() => {
-                    onChange(value.filter((_, imageIndex) => imageIndex !== index));
-                    setMessage("");
-                  }}
+                  onClick={() => removeImage(image, index)}
                   className="rounded-full border border-stone-900/10 p-2 text-stone-600 transition hover:bg-red-50 hover:text-red-600"
                   aria-label={`Удалить изображение ${index + 1}`}
                 >
